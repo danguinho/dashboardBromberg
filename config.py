@@ -18,7 +18,7 @@ DIAS_FUTUROS_EXIBIR = 13
 
 # Período de exibição dos processos prontos.
 # Considera hoje e os dois dias anteriores.
-DIAS_PRONTOS_EXIBIR = 4
+DIAS_PRONTOS_EXIBIR = 30
 
 
 # ============================================================

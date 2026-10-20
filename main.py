@@ -57,7 +57,7 @@ class Aplicacao:
         self.centralizar()
         self.mostrar_abertura()
 
-        self.root.after(1600, self.mostrar_selecao)
+        self.root.after(8000, self.mostrar_selecao)
 
     # --------------------------------------------------------
     # JANELA
@@ -167,8 +167,9 @@ class Aplicacao:
 
         tk.Label(
             painel,
-            text="Desenvolvido por Daniel Moure",
-            font=("Arial", 9),
+            text="Desenvolvido por Daniel Moure - Estagiário do Setor de Revestimento e Pintura"
+            ", 2026.",
+            font=("Arial", 12),
             fg="#DDDDDD",
             bg=ROXO
         ).pack(

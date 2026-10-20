@@ -228,10 +228,12 @@ def preparar_processos(df):
 
     colunas_data = [
         "Chegada",
+        "Jateamento",
+        "Data Jateamento",
+        "Data do Jateamento",
         "1ª Demão",
         "2ª Demão",
         "3ª Demão",
-        "Data da Liberação",
         "Prazo Entrega Contratual",
         "Prazo Entrega Original",
     ]
@@ -265,25 +267,43 @@ def cruzar_dados(carteira, processos):
         keep="last",
     )
 
+    # O Controle de Processos é a fonte oficial dos status de produção.
+    # Um LEFT JOIN pela Carteira escondia OS que existiam no Controle,
+    # mas ainda não estavam na Carteira. O OUTER JOIN preserva ambos os lados.
     resultado = carteira.merge(
         processos,
         on="OS",
-        how="left",
+        how="outer",
         suffixes=("", "_Processo"),
         validate="many_to_one",
+        indicator=True,
     )
 
-    correspondencias = (
-        resultado["Processo"].notna().sum()
-        if "Processo" in resultado.columns
-        else 0
-    )
+    # Quando há colunas repetidas (por exemplo Cliente), prioriza a Carteira,
+    # mas completa os vazios com o valor disponível no Controle de Processos.
+    colunas_sufixadas = [
+        coluna for coluna in resultado.columns
+        if coluna.endswith("_Processo")
+    ]
+    for coluna_secundaria in colunas_sufixadas:
+        coluna_principal = coluna_secundaria[:-9]
+        if coluna_principal in resultado.columns:
+            resultado[coluna_principal] = resultado[coluna_principal].combine_first(
+                resultado[coluna_secundaria]
+            )
+        else:
+            resultado.rename(columns={coluna_secundaria: coluna_principal}, inplace=True)
+
+    correspondencias = int((resultado["_merge"] == "both").sum())
+    somente_controle = int((resultado["_merge"] == "right_only").sum())
+    resultado.drop(columns=["_merge"], inplace=True)
 
     print("=" * 55)
     print("CRUZAMENTO DAS PLANILHAS")
     print(f"OS da Carteira: {len(carteira)}")
     print(f"OS do Controle: {len(processos)}")
-    print(f"OS associadas: {correspondencias}")
+    print(f"OS associadas entre as planilhas: {correspondencias}")
+    print(f"OS preservadas somente do Controle: {somente_controle}")
     print(f"Linhas resultantes: {len(resultado)}")
     print("=" * 55)
 
@@ -483,47 +503,52 @@ def preparar_dados_dashboard(carteira, processos):
 # ============================================================
 
 def _filtrar_processo(df, palavra):
-    if "Processo" not in df.columns:
-        return df.iloc[0:0].copy()
+    """Filtra pelo status exato, ignorando caixa, acentos e espaços."""
+    if df is None or df.empty or "Processo" not in df.columns:
+        return df.iloc[0:0].copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
 
-    processo = (
-        df["Processo"]
-        .fillna("")
-        .astype(str)
-        .apply(texto_normalizado)
-    )
-
+    processo = df["Processo"].apply(texto_normalizado)
     palavra = texto_normalizado(palavra)
 
-    return df[
-        processo.str.contains(
-            palavra,
-            regex=False,
-            na=False,
-        )
-    ].copy()
+    return df[processo == palavra].copy()
 
 
 def dados_jateamento(df):
-    """Retorna OS classificadas como Jateando."""
+    """Retorna todas as OS Jateando, com data de jateamento primeiro."""
+    resultado = _filtrar_processo(df, "jateando")
+    if resultado.empty:
+        return resultado
 
-    return _filtrar_processo(df, "jateando")
+    coluna_jateamento = encontrar_coluna(
+        resultado,
+        ["Jateamento", "Data Jateamento", "Data do Jateamento"],
+    )
+    if coluna_jateamento is None:
+        return resultado
+
+    resultado["_Data_Jateamento_Ordenacao"] = resultado[coluna_jateamento].apply(data_valida)
+    resultado["_Jateamento_Preenchido"] = resultado["_Data_Jateamento_Ordenacao"].notna()
+    resultado = resultado.sort_values(
+        by=["_Jateamento_Preenchido", "_Data_Jateamento_Ordenacao"],
+        ascending=[False, False],
+        na_position="last",
+    )
+    return resultado.drop(columns=["_Data_Jateamento_Ordenacao", "_Jateamento_Preenchido"])
 
 
 def dados_pintura(df):
-    """Retorna OS classificadas como Em Pintura."""
-
-    return _filtrar_processo(df, "pintura")
+    """Retorna apenas OS cujo status seja exatamente Em Pintura."""
+    return _filtrar_processo(df, "Em Pintura")
 
 
 # ============================================================
-# TELA PRONTO — ÚLTIMOS 3 DIAS
+# TELA PRONTO — ÚLTIMOS 30 DIAS
 # ============================================================
 
 def dados_prontos(df):
     """
-    Retorna processos prontos cuja data da 2ª demão
-    esteja nos últimos 3 dias, incluindo hoje.
+    Retorna processos com status Pronto cuja data da 2ª demão
+    esteja dentro da janela configurada, incluindo hoje.
 
     A data da 2ª demão é utilizada como data em que
     a peça ficou pronta.

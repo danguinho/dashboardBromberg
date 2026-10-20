@@ -135,6 +135,13 @@ class Dashboard:
         self.area_atual = "inicio"
         self.indice_tela = 0
         self.automatica_ativa = True
+        self.busca_os = ""
+        self._id_busca = None
+        self._campo_busca_processos = None
+        self._campo_busca_carteira = None
+        self._pausa_por_busca = False
+        self.modo_apresentacao = False
+        self._geometria_anterior = None
 
         self._id_troca = None
         self._id_rolagem = None
@@ -152,6 +159,8 @@ class Dashboard:
         self.root.geometry("1350x800")
         self.root.minsize(1000, 650)
         self.root.configure(bg=CINZA)
+        self.root.bind_all("<F11>", self.alternar_modo_apresentacao)
+        self.root.bind_all("<Escape>", self.sair_modo_apresentacao)
 
         self.telas_processos = [
             {
@@ -308,6 +317,13 @@ class Dashboard:
     def _limpar_corpo(self):
         self._parar_rolagem()
 
+        # Os controles podem ser destruídos ao entrar no modo TV ou trocar
+        # de tela. Limpe as referências para que callbacks da rolagem não
+        # tentem atualizar botões que já não existem no Tcl/Tk.
+        self.botao_rolagem = None
+        self.botao_pausa = None
+        self.indicador_tela = None
+
         for widget in self.corpo.winfo_children():
             widget.destroy()
 
@@ -346,6 +362,9 @@ class Dashboard:
     def mostrar_inicio(self):
         self._parar_alternancia()
         self.area_atual = "inicio"
+        self.busca_os = ""
+        self._campo_busca_processos = None
+        self._campo_busca_carteira = None
         self._limpar_corpo()
 
         self.titulo_cabecalho.config(text="DASHBOARD OPERACIONAL")
@@ -535,9 +554,17 @@ class Dashboard:
             pady=(0, 4),
         )
 
+        titulo_normalizado = str(texto).strip().upper()
+        if titulo_normalizado == "PRONTO":
+            descricao_quantidade = f"{quantidade} OS nos últimos 30 dias"
+        elif titulo_normalizado == "PRAZOS DA CARTEIRA":
+            descricao_quantidade = f"{quantidade} OS com prazos nos próximos 14 dias"
+        else:
+            descricao_quantidade = f"{quantidade} OS"
+
         tk.Label(
             pai,
-            text=f"{quantidade} OS",
+            text=descricao_quantidade,
             bg=fundo,
             fg=cor,
             font=("Segoe UI", 10, "bold"),
@@ -707,6 +734,107 @@ class Dashboard:
         )
 
     # ========================================================
+    # BUSCA POR ORDEM DE SERVIÇO
+    # ========================================================
+
+    @staticmethod
+    def _normalizar_busca_os(valor):
+        """Normaliza a busca sem remover hífens do identificador da OS."""
+        texto = unicodedata.normalize("NFKD", str(valor or ""))
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        return " ".join(texto.casefold().strip().split())
+
+    def _filtrar_os_busca(self, registros, consulta=None):
+        consulta = self._normalizar_busca_os(
+            self.busca_os if consulta is None else consulta
+        )
+        if registros is None or registros.empty or not consulta:
+            return registros.copy() if isinstance(registros, pd.DataFrame) else pd.DataFrame()
+        if "OS" not in registros.columns:
+            return registros.iloc[0:0].copy()
+        os_normalizadas = registros["OS"].apply(self._normalizar_busca_os)
+        return registros[os_normalizadas.str.contains(consulta, regex=False, na=False)].copy()
+
+    def _agendar_busca_processos(self, evento=None):
+        """Pausa a rolagem imediatamente ao digitar e agenda o filtro."""
+        campo = self._campo_busca_processos
+        if campo is not None:
+            try:
+                consulta_atual = campo.get().strip()
+            except tk.TclError:
+                consulta_atual = ""
+
+            if consulta_atual:
+                # Só retomaremos automaticamente se a rolagem estava ativa
+                # antes da busca; uma pausa manual do usuário é respeitada.
+                if self._id_rolagem is not None and not self.rolagem_pausada_manual:
+                    self._pausa_por_busca = True
+                if self._pausa_por_busca:
+                    self.pausar_rolagem_manual()
+            elif self._pausa_por_busca:
+                # A consulta foi apagada: o render da lista reinicia a rolagem.
+                self._pausa_por_busca = False
+
+        if self._id_busca is not None:
+            try:
+                self.root.after_cancel(self._id_busca)
+            except tk.TclError:
+                pass
+        self._id_busca = self.root.after(180, self._aplicar_busca_processos)
+
+    def _aplicar_busca_processos(self):
+        self._id_busca = None
+        campo = self._campo_busca_processos
+        if campo is None:
+            return
+        try:
+            if not campo.winfo_exists():
+                return
+            self.busca_os = campo.get().strip()
+            cursor = campo.index(tk.INSERT)
+        except tk.TclError:
+            return
+
+        self._mostrar_tela_processo()
+        novo_campo = self._campo_busca_processos
+        if novo_campo is not None:
+            try:
+                novo_campo.focus_set()
+                novo_campo.icursor(tk.END if cursor is None else min(cursor, len(self.busca_os)))
+            except tk.TclError:
+                pass
+        self._agendar_troca()
+
+    def _agendar_busca_carteira(self, evento=None):
+        if self._id_busca is not None:
+            try:
+                self.root.after_cancel(self._id_busca)
+            except tk.TclError:
+                pass
+        self._id_busca = self.root.after(180, self._aplicar_busca_carteira)
+
+    def _aplicar_busca_carteira(self):
+        self._id_busca = None
+        campo = self._campo_busca_carteira
+        if campo is None:
+            return
+        try:
+            if not campo.winfo_exists():
+                return
+            self.busca_os = campo.get().strip()
+            cursor = campo.index(tk.INSERT)
+        except tk.TclError:
+            return
+        self.mostrar_carteira()
+        novo_campo = self._campo_busca_carteira
+        if novo_campo is not None:
+            try:
+                novo_campo.focus_set()
+                novo_campo.icursor(min(cursor, len(self.busca_os)))
+            except tk.TclError:
+                pass
+
+    # ========================================================
     # CARTEIRA E PRAZOS
     # ========================================================
 
@@ -718,28 +846,108 @@ class Dashboard:
         self.titulo_cabecalho.config(text="CARTEIRA DE PEDIDOS")
         self._barra_interna("Prazos e prioridades")
 
+        barra_busca = tk.Frame(self.corpo, bg=CINZA)
+        barra_busca.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            barra_busca, text="Buscar OS:", bg=CINZA, fg=ROXO,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left", padx=(0, 8))
+        campo_busca = ttk.Entry(barra_busca, width=22, font=("Segoe UI", 11))
+        campo_busca.pack(side="left")
+        campo_busca.insert(0, self.busca_os)
+        campo_busca.bind("<KeyRelease>", self._agendar_busca_carteira)
+        self._campo_busca_carteira = campo_busca
+        tk.Label(
+            barra_busca, text="Digite a OS completa ou parte dela.",
+            bg=CINZA, fg=CINZA_ESCURO, font=("Segoe UI", 9),
+        ).pack(side="left", padx=10)
+
         try:
             registros = dados_prazos(self.dados)
         except Exception as erro:
             self._vazio(f"Não foi possível preparar os prazos:\n{erro}")
             return
 
+        registros = self._filtrar_os_busca(registros)
         self._titulo("Carteira e prazos", len(registros))
         if registros.empty:
-            self._vazio("Nenhuma OS foi encontrada na janela de prazos.")
+            mensagem = (
+                f"Nenhuma OS correspondente a '{self.busca_os}' foi encontrada na janela de prazos."
+                if self.busca_os
+                else "Nenhuma OS foi encontrada na janela de prazos."
+            )
+            self._vazio(mensagem)
             return
+
+        # Os status ficam associados à OS, mas não ocupam mais as três últimas
+        # colunas da tabela. A edição é feita pelos três botões abaixo.
+        self._status_materiais_por_os = {}
+        # Alterações ficam em memória até o usuário clicar em Salvar alterações.
+        self._alteracoes_pendentes_carteira = {}
+        for _, linha in registros.iterrows():
+            os_chave = self._texto(linha.get("OS")).strip()
+            status_isolamento = self._texto(linha.get("Isolamento")).strip() or "Não Solicitado"
+            status_mascara = self._texto(linha.get("Máscara")).strip() or "Não Solicitado"
+            status_tintas = self._texto(linha.get("Solicitação - Tinta")).strip() or "Não Solicitado"
+            self._status_materiais_por_os[os_chave] = {
+                "Isolamento": status_isolamento,
+                "Máscara": status_mascara,
+                "Tintas": status_tintas,
+            }
+        self._status_materiais_originais_carteira = {
+            os_chave: dict(status) for os_chave, status in self._status_materiais_por_os.items()
+        }
 
         colunas = {
             "OS": 125,
-            "Cliente": 220,
-            "Prazo": 115,
-            "Dias": 70,
-            "Alerta": 190,
-            "Isolamento": 140,
-            "Máscara": 140,
-            "Tintas": 140,
+            "Cliente": 240,
+            "Prazo": 125,
+            "Dias": 75,
+            "Alerta": 220,
         }
-        tabela = self._tabela(self.corpo, colunas)
+        barra_acoes = tk.Frame(self.corpo, bg=CINZA)
+        barra_acoes.pack(fill="x", pady=(10, 0))
+        tk.Label(
+            barra_acoes,
+            text="Selecione uma OS e use os botões para alternar o status de cada material:",
+            bg=CINZA, fg=CINZA_ESCURO, font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(0, 8))
+
+        botoes_materiais = tk.Frame(barra_acoes, bg=CINZA)
+        botoes_materiais.pack(fill="x")
+        self._botoes_status_carteira = {}
+        for nome in ("Isolamento", "Máscara", "Tintas"):
+            botao = self._botao(
+                botoes_materiais,
+                f"{nome}: selecione uma OS",
+                lambda material=nome: self._alternar_status_material(tabela, material),
+                fundo="#D1D5DB",
+                cor=ROXO,
+                fonte=10,
+            )
+            botao.pack(side="left", padx=(0, 8), pady=(0, 4))
+            botao.configure(state="disabled")
+            self._botoes_status_carteira[nome] = botao
+
+        self._botao(
+            botoes_materiais,
+            "Salvar alterações",
+            self._salvar_alteracoes_pendentes_carteira,
+            fundo=CIANO,
+            cor=ROXO,
+            fonte=10,
+        ).pack(side="right", padx=(8, 0), pady=(0, 4))
+
+        self._label_pendencias_carteira = tk.Label(
+            barra_acoes,
+            text="Nenhuma alteração pendente.",
+            bg=CINZA,
+            fg=CINZA_ESCURO,
+            font=("Segoe UI", 9),
+        )
+        self._label_pendencias_carteira.pack(anchor="w", pady=(2, 0))
+
+        tabela = self._tabela(self.corpo, colunas, altura=10)
         tabela.tag_configure("cinza", background=CINZA_ATRASADO, foreground=TEXTO_ATRASADO)
         tabela.tag_configure("vermelho", background=VERMELHO_FUNDO, foreground=VERMELHO_TEXTO)
         tabela.tag_configure("amarelo", background=AMARELO_FUNDO, foreground=AMARELO_TEXTO)
@@ -752,110 +960,112 @@ class Dashboard:
                 dias = 0
             tag = "cinza" if dias <= -2 else "vermelho" if dias <= 2 else "amarelo" if dias <= 6 else "azul"
             tabela.insert(
-                "",
-                "end",
+                "", "end",
                 values=(
                     self._texto(linha.get("OS")),
                     self._texto(linha.get("Cliente")),
                     self._texto(linha.get("Prazo")),
                     dias,
                     texto_prazo(dias),
-                    self._texto(linha.get("Isolamento")),
-                    self._texto(linha.get("Máscara")),
-                    self._texto(linha.get("Solicitação - Tinta")),
                 ),
                 tags=(tag,),
             )
 
-        # Duplo clique nas células de status abre uma setinha na própria célula.
-        tabela.bind(
-            "<Double-1>",
-            lambda evento: self._editar_status_na_celula(evento, tabela),
-        )
-
+        tabela.bind("<<TreeviewSelect>>", lambda _evento: self._atualizar_botoes_status_carteira(tabela))
         tk.Label(
             self.corpo,
-            text=(
-                "Para alterar, dê dois cliques em uma célula de Isolamento, "
-                "Máscara ou Tintas e escolha o status na setinha. "
-                "A alteração será salva na planilha Excel."
-            ),
-            bg=CINZA,
-            fg=CINZA_ESCURO,
-            font=("Segoe UI", 10),
-            wraplength=1000,
-            justify="left",
-        ).pack(anchor="w", pady=(8, 0))
+            text="Cada clique alterna entre Não Solicitado → Solicitado → Peça sem material → Não Solicitado."
+            "A alteração é gravada somente na planilha Carteira.",
+            bg=CINZA, fg=CINZA_ESCURO, font=("Segoe UI", 9), wraplength=1100, justify="left",
+        ).pack(anchor="w", pady=(5, 0))
 
-    def _editar_status_na_celula(self, evento, tabela):
-        """Mostra um Combobox na célula de status e grava a escolha no Excel."""
-        item_id = tabela.identify_row(evento.y)
-        coluna_id = tabela.identify_column(evento.x)
-        if not item_id or coluna_id not in ("#6", "#7", "#8"):
+    def _atualizar_botoes_status_carteira(self, tabela):
+        selecionados = tabela.selection()
+        if not selecionados:
+            return
+        valores = tabela.item(selecionados[0], "values")
+        if not valores:
+            return
+        os_chave = str(valores[0]).strip()
+        status = getattr(self, "_status_materiais_por_os", {}).get(os_chave, {})
+        for nome, botao in getattr(self, "_botoes_status_carteira", {}).items():
+            atual = status.get(nome, "Não Solicitado")
+            if atual == "Solicitado":
+                fundo, cor = "#198754", "#FFFFFF"  # verde: solicitado
+            elif atual.startswith("Peça Sem"):
+                fundo, cor = "#F59E0B", "#422006"  # âmbar: peça sem material
+            else:
+                fundo, cor = "#D1D5DB", ROXO  # cinza: ainda não solicitado
+            botao.configure(text=f"{nome}: {atual}", state="normal", bg=fundo, fg=cor, activebackground=fundo, 
+                            activeforeground=cor)
+
+    def _alternar_status_material(self, tabela, material):
+        selecionados = tabela.selection()
+        if not selecionados:
+            messagebox.showwarning("Selecionar OS", "Selecione uma OS na tabela primeiro.", parent=self.root)
+            return
+        valores = tabela.item(selecionados[0], "values")
+        if not valores:
+            return
+        os_chave = str(valores[0]).strip()
+        status_os = getattr(self, "_status_materiais_por_os", {}).get(os_chave)
+        if status_os is None:
+            messagebox.showerror("Status não encontrado",
+                                 "Não consegui identificar os status dessa OS.",
+                                 parent=self.root)
             return
 
-        bbox = tabela.bbox(item_id, coluna_id)
-        if not bbox:
+        atual = status_os.get(material, "Não Solicitado")
+        status_sem = {
+            "Isolamento": "Peça Sem Isolamento",
+            "Máscara": "Peça Sem Máscara",
+            "Tintas": "Peça Sem Pintura",
+        }[material]
+        ciclo = ["Não Solicitado", "Solicitado", status_sem]
+        novo = ciclo[(ciclo.index(atual) + 1) % len(ciclo)] if atual in ciclo else "Solicitado"
+
+        # Não acessa o Excel aqui: apenas registra a mudança pendente na interface.
+        status_os[material] = novo
+        pendentes = self._alteracoes_pendentes_carteira.setdefault(os_chave, {})
+        valor_original = self._status_materiais_originais_carteira.get(os_chave, {}).get(material, "Não Solicitado")
+        if novo == valor_original:
+            pendentes.pop(material, None)
+            if not pendentes:
+                self._alteracoes_pendentes_carteira.pop(os_chave, None)
+        else:
+            pendentes[material] = novo
+        self._atualizar_botoes_status_carteira(tabela)
+        total = sum(len(v) for v in self._alteracoes_pendentes_carteira.values())
+        texto = f"{total} alteração(ões) pendente(s) — clique em Salvar alterações." if total else "Nenhuma "
+        "alteração pendente."
+        self._label_pendencias_carteira.config(text=texto)
+
+    def _salvar_alteracoes_pendentes_carteira(self):
+        pendentes = getattr(self, "_alteracoes_pendentes_carteira", {})
+        if not pendentes:
+            messagebox.showinfo("Carteira", "Não há alterações pendentes para salvar.", parent=self.root)
             return
-        x, y, largura, altura = bbox
-        valores = list(tabela.item(item_id, "values"))
-        if len(valores) < 8:
+        try:
+            self._salvar_status_excel_lote(pendentes)
+        except Exception as erro:
+            messagebox.showerror(
+                "Erro ao salvar",
+                f"Não foi possível salvar as alterações na planilha Carteira.\n\n{erro}",
+                parent=self.root,
+            )
             return
 
-        indice = int(coluna_id[1:]) - 1
-        os_numero = str(valores[0]).strip()
-        nome_campo = {5: "Isolamento", 6: "Máscara", 7: "Tintas"}[indice]
-        opcoes = [
-            "Não Solicitado",
-            "Solicitado",
-            "Peça Sem Máscara",
-            "Peça Sem Isolamento",
-            "Peça Sem Pintura",
-            "Não se aplica",
-        ]
-        atual = str(valores[indice] or "Não Solicitado").strip()
-        if atual and atual not in opcoes:
-            opcoes.insert(0, atual)
-
-        combo = ttk.Combobox(tabela, values=opcoes, state="readonly", font=("Segoe UI", 10))
-        combo.place(x=x, y=y, width=largura, height=altura)
-        combo.set(atual or "Não Solicitado")
-        combo.focus_set()
-        combo.event_generate("<Button-1>")
-
-        finalizado = {"valor": False}
-
-        def concluir(_evento=None):
-            if finalizado["valor"]:
-                return
-            novo_status = combo.get().strip()
-            if not novo_status:
-                combo.destroy()
-                return
-            if novo_status == atual:
-                combo.destroy()
-                return
-            finalizado["valor"] = True
-            combo.configure(state="disabled")
-            try:
-                self._salvar_status_excel(os_numero, {nome_campo: novo_status})
-            except Exception as erro:
-                combo.destroy()
-                messagebox.showerror(
-                    "Erro ao salvar status",
-                    f"Não foi possível atualizar o status da OS {os_numero} na planilha.\n\n{erro}",
-                    parent=self.root,
-                )
-                return
-
-            valores[indice] = novo_status
-            tabela.item(item_id, values=valores)
-            combo.destroy()
-            self.atualizar_status(f"OS {os_numero}: {nome_campo} atualizado para '{novo_status}'.")
-
-        combo.bind("<<ComboboxSelected>>", concluir)
-        combo.bind("<Escape>", lambda _e: combo.destroy())
-        combo.bind("<FocusOut>", lambda _e: combo.after(150, combo.destroy))
+        self._status_materiais_originais_carteira = {
+            os_chave: dict(status) for os_chave, status in self._status_materiais_por_os.items()
+        }
+        quantidade = sum(len(v) for v in pendentes.values())
+        self._alteracoes_pendentes_carteira = {}
+        self._label_pendencias_carteira.config(text="Alterações salvas na planilha Carteira.")
+        messagebox.showinfo(
+            "Alterações salvas",
+            f"{quantidade} alteração(ões) gravada(s) na planilha Carteira.",
+            parent=self.root,
+        )
 
     @staticmethod
     def _normalizar_cabecalho(valor):
@@ -887,46 +1097,54 @@ class Dashboard:
             row=0, column=0, columnspan=2, padx=22, pady=(18, 12), sticky="w"
         )
 
-        opcoes = [
-            "Não Solicitado",
-            "Solicitado",
-            "Peça Sem Máscara",
-            "Peça Sem Isolamento",
-            "Peça Sem Pintura",
-            "Não se aplica",
-        ]
-        campos = [
-            ("Isolamento", 5),
-            ("Máscara", 6),
-            ("Tintas", 7),
-        ]
+        # Cada coluna tem suas próprias opções. Assim, uma situação de máscara
+        # não pode ser selecionada por engano em isolamento ou tintas.
+        opcoes_por_campo = {
+            "Isolamento": ["Não Solicitado", "Solicitado", "Peça Sem Isolamento", "Não se aplica"],
+            "Máscara": ["Não Solicitado", "Solicitado", "Peça Sem Máscara", "Não se aplica"],
+            "Tintas": ["Não Solicitado", "Solicitado", "Peça Sem Pintura", "Não se aplica"],
+        }
+        campos = [("Isolamento", 5), ("Máscara", 6), ("Tintas", 7)]
         variaveis = {}
         for linha_idx, (nome, indice) in enumerate(campos, start=1):
             tk.Label(janela, text=nome, bg=CINZA, fg=ROXO, font=("Segoe UI", 11, "bold")).grid(
                 row=linha_idx, column=0, padx=(22, 12), pady=7, sticky="w"
             )
+
             atual = str(valores[indice] or "Não Solicitado").strip()
-            lista = list(opcoes)
+            lista = list(opcoes_por_campo[nome])
+            # Preserva qualquer valor já existente na carteira, mesmo que seja legado.
             if atual and atual not in lista:
                 lista.insert(0, atual)
             var = tk.StringVar(value=atual or "Não Solicitado")
-            combo = ttk.Combobox(janela, textvariable=var, values=lista, state="readonly", width=27)
+            combo = ttk.Combobox(janela, textvariable=var, values=lista, state="readonly", width=30)
             combo.grid(row=linha_idx, column=1, padx=(0, 22), pady=7, sticky="ew")
             variaveis[nome] = var
 
         def salvar():
             novos = {nome: var.get().strip() for nome, var in variaveis.items()}
+            alterados = {
+                nome: valor
+                for nome, valor in novos.items()
+                if valor != str(valores[{"Isolamento": 5, "Máscara": 6, "Tintas": 7}[nome]] or "Não Solicitado").strip()
+            }
+            if not alterados:
+                janela.destroy()
+                return
             try:
-                self._salvar_status_excel(os_numero, novos)
+                self._salvar_status_excel(os_numero, alterados)
             except Exception as erro:
                 messagebox.showerror("Erro ao salvar", f"Não foi possível salvar no Excel.\n\n{erro}", parent=janela)
                 return
 
-            valores[5] = novos["Isolamento"]
-            valores[6] = novos["Máscara"]
-            valores[7] = novos["Tintas"]
+            for nome, indice in (("Isolamento", 5), ("Máscara", 6), ("Tintas", 7)):
+                if nome in alterados:
+                    valores[indice] = alterados[nome]
             tabela.item(item_id, values=valores)
-            messagebox.showinfo("Status atualizado", f"Os status da OS {os_numero} foram atualizados.", parent=janela)
+            # A confirmação é exibida pela própria janela de edição.
+            messagebox.showinfo(
+                "Status atualizado", f"As alterações da OS {os_numero} foram salvas na carteira Excel.", parent=janela
+            )
             janela.destroy()
 
         botoes = tk.Frame(janela, bg=CINZA)
@@ -934,6 +1152,99 @@ class Dashboard:
         self._botao(botoes, "Cancelar", janela.destroy, fundo="#D1D5DB", cor=ROXO).pack(side="right", padx=(8, 0))
         self._botao(botoes, "Salvar alterações", salvar, fundo=CIANO, cor=ROXO).pack(side="right")
         janela.bind("<Escape>", lambda _event: janela.destroy())
+
+    def _salvar_status_excel_lote(self, alteracoes):
+        """Grava todas as alterações pendentes na Carteira em uma única sessão COM."""
+        caminho = str(self.caminho_carteira or "").strip()
+        if not caminho or not os.path.isfile(caminho):
+            raise FileNotFoundError(f"Arquivo da carteira não encontrado:\n{caminho or '(caminho vazio)'}")
+        try:
+            import win32com.client as win32
+        except ImportError as erro:
+            raise RuntimeError("Instale pywin3 usado pelo Dashboard: python -m pip install pywin32") from erro
+
+        def norm(v):
+            return self._normalizar_cabecalho(v)
+
+        aliases = {
+            "OS": {norm(x) for x in ("OS", "Ordem de Serviço", "Ordem Serviço", "N OS", "Número OS")},
+            "Isolamento": {norm(x) for x in ("Isolamento", "Status Isolamento", 
+                                             "Solicitação Isolamento", "Solicitação de Isolamento")},
+            "Máscara": {norm(x) for x in ("Máscara", "Status Máscara",
+                                          "Solicitação Máscara", "Solicitação de Máscara")},
+            "Tintas": {norm(x) for x in ("Solicitação - Tinta", "Solicitação Tinta", "Solicitação de Tinta", "Tintas",
+                                         "Status Tinta", "Status Tintas")},
+        }
+        excel = None
+        workbook = None
+        abriu_arquivo = False
+        salvamento_concluido = False
+        try:
+            excel = win32.DispatchEx("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.EnableEvents = False
+            caminho_norm = os.path.normcase(os.path.abspath(caminho))
+            for wb in excel.Workbooks:
+                try:
+                    if os.path.normcase(os.path.abspath(wb.FullName)) == caminho_norm:
+                        workbook = wb
+                        break
+                except Exception:
+                    pass
+            if workbook is None:
+                workbook = excel.Workbooks.Open(os.path.abspath(caminho), UpdateLinks=0, ReadOnly=False)
+                abriu_arquivo = True
+            encontrados = set()
+            pendentes_normalizados = {str(k).strip().replace(".0", ""): v for k, v in alteracoes.items()}
+            for planilha in workbook.Worksheets:
+                usado = planilha.UsedRange
+                ultima_linha = usado.Row + usado.Rows.Count - 1
+                ultima_coluna = usado.Column + usado.Columns.Count - 1
+                mapa = None
+                linha_cabecalho = None
+                for r in range(1, min(max(ultima_linha, 1), 10) + 1):
+                    cab = {}
+                    for c in range(1, ultima_coluna + 1):
+                        chave = norm(planilha.Cells(r, c).Value or "")
+                        for campo, nomes in aliases.items():
+                            if chave in nomes and campo not in cab:
+                                cab[campo] = c
+                    if "OS" in cab and any(k in cab for k in ("Isolamento", "Máscara", "Tintas")):
+                        mapa, linha_cabecalho = cab, r
+                        break
+                if not mapa:
+                    continue
+                for r in range(linha_cabecalho + 1, ultima_linha + 1):
+                    valor_os = planilha.Cells(r, mapa["OS"]).Value
+                    if valor_os is None:
+                        continue
+                    os_planilha = str(valor_os).strip()
+                    if os_planilha.endswith(".0"):
+                        os_planilha = os_planilha[:-2]
+                    if os_planilha not in pendentes_normalizados:
+                        continue
+                    for material, novo_status in pendentes_normalizados[os_planilha].items():
+                        if material not in mapa:
+                            raise RuntimeError(f"A coluna de status '{material}' não foi encontrada na planilha.")
+                        planilha.Cells(r, mapa[material]).Value = novo_status
+                    encontrados.add(os_planilha)
+            faltantes = set(pendentes_normalizados) - encontrados
+            if faltantes:
+                raise RuntimeError("Não encontrei estas OS na planilha Carteira: " + ", ".join(sorted(faltantes)))
+            workbook.Save()
+            salvamento_concluido = True
+        finally:
+            if workbook is not None and abriu_arquivo:
+                try:
+                    workbook.Close(SaveChanges=salvamento_concluido)
+                except Exception:
+                    pass
+            if excel is not None:
+                try:
+                    excel.Quit()
+                except Exception:
+                    pass
 
     def _salvar_status_excel(self, os_numero, novos_status):
         """Atualiza os status na carteira usando Excel COM, preservando macros.
@@ -977,12 +1288,12 @@ class Dashboard:
         abriu_excel = False
         abriu_arquivo = False
         try:
-            try:
-                excel = win32.GetActiveObject("Excel.Application")
-            except Exception:
-                excel = win32.DispatchEx("Excel.Application")
-                abriu_excel = True
-            excel.Visible = True
+            # Usa uma instância COM própria e oculta: não abre nem traz a janela
+            # do Excel para frente quando o usuário altera um status no Dashboard.
+            excel = win32.DispatchEx("Excel.Application")
+            abriu_excel = True
+            excel.Visible = False
+            excel.DisplayAlerts = False
             excel.EnableEvents = True
 
             caminho_norm = os.path.normcase(os.path.abspath(caminho))
@@ -1069,6 +1380,57 @@ class Dashboard:
         self._mostrar_tela_processo()
         self._agendar_troca()
 
+    def entrar_modo_apresentacao(self):
+        """Exibe o carrossel em tela cheia, sem cabeçalho, rodapé ou controles."""
+        if self.area_atual != "processos":
+            self.mostrar_controle_processos()
+
+        if self.modo_apresentacao:
+            return
+
+        self.modo_apresentacao = True
+        try:
+            self._geometria_anterior = self.root.geometry()
+            self.cabecalho.pack_forget()
+            self.rodape.pack_forget()
+            self.corpo.pack_configure(padx=0, pady=0)
+            self.root.attributes("-fullscreen", True)
+        except tk.TclError:
+            self.modo_apresentacao = False
+            return
+
+        self._mostrar_tela_processo()
+        self._agendar_troca()
+
+    def sair_modo_apresentacao(self, evento=None):
+        """Sai do modo TV com Esc e restaura a janela normal."""
+        if not self.modo_apresentacao:
+            return
+
+        self.modo_apresentacao = False
+        self._parar_rolagem()
+        self._parar_alternancia()
+
+        try:
+            self.root.attributes("-fullscreen", False)
+            self.cabecalho.pack(fill="x", before=self.corpo)
+            self.rodape.pack(fill="x", side="bottom")
+            self.corpo.pack_configure(padx=22, pady=18)
+            if self._geometria_anterior:
+                self.root.geometry(self._geometria_anterior)
+        except tk.TclError:
+            pass
+
+        if self.area_atual == "processos":
+            self._mostrar_tela_processo()
+            self._agendar_troca()
+
+    def alternar_modo_apresentacao(self, evento=None):
+        if self.modo_apresentacao:
+            self.sair_modo_apresentacao()
+        else:
+            self.entrar_modo_apresentacao()
+
     def _parar_alternancia(self):
         if self._id_troca is not None:
             try:
@@ -1081,7 +1443,7 @@ class Dashboard:
     def _agendar_troca(self):
         self._parar_alternancia()
 
-        if self.area_atual == "processos" and self.automatica_ativa:
+        if self.area_atual == "processos" and self.automatica_ativa and not self.busca_os:
             self._id_troca = self.root.after(
                 TEMPO_TELA_MS,
                 self._trocar_tela_automatica,
@@ -1140,22 +1502,27 @@ class Dashboard:
 
         tela = self.telas_processos[self.indice_tela]
 
-        self._criar_controles_processos()
+        if not self.modo_apresentacao:
+            self._criar_controles_processos()
 
         painel = tk.Frame(
             self.corpo,
             bg=tela["fundo"],
-            padx=18,
-            pady=15,
+            padx=0 if self.modo_apresentacao else 18,
+            pady=0 if self.modo_apresentacao else 15,
         )
         painel.pack(
             fill="both",
             expand=True,
         )
 
+        quantidade = self._quantidade_tela(tela["funcao"])
+        if self.busca_os:
+            quantidade = self._quantidade_filtrada_tela(tela["funcao"])
+
         self._titulo(
             tela["nome"],
-            self._quantidade_tela(tela["funcao"]),
+            quantidade,
             pai=painel,
             fundo=tela["fundo"],
             cor=tela["texto"],
@@ -1178,31 +1545,13 @@ class Dashboard:
         self._atualizar_indicador()
 
     def _criar_controles_processos(self):
-        barra = tk.Frame(
-            self.corpo,
-            bg=CINZA,
-        )
-        barra.pack(
-            fill="x",
-            pady=(0, 10),
-        )
+        # Primeira linha: navegação e rolagem. Segunda linha: busca,
+        # evitando que os controles sejam cortados em janelas menores.
+        barra = tk.Frame(self.corpo, bg=CINZA)
+        barra.pack(fill="x", pady=(0, 4))
 
-        self._botao(
-            barra,
-            "⌂ Menu inicial",
-            self.mostrar_inicio,
-            fundo=ROXO,
-        ).pack(side="left")
-
-        self._botao(
-            barra,
-            "◀ Anterior",
-            self.anterior,
-            fundo=AZUL,
-        ).pack(
-            side="left",
-            padx=(10, 0),
-        )
+        self._botao(barra, "⌂ Menu inicial", self.mostrar_inicio, fundo=ROXO).pack(side="left")
+        self._botao(barra, "◀ Anterior", self.anterior, fundo=AZUL).pack(side="left", padx=(8, 0))
 
         self.botao_pausa = self._botao(
             barra,
@@ -1211,41 +1560,42 @@ class Dashboard:
             fundo=CIANO,
             cor=ROXO,
         )
-        self.botao_pausa.pack(
-            side="left",
-            padx=10,
-        )
+        self.botao_pausa.pack(side="left", padx=8)
 
-        self._botao(
-            barra,
-            "Próxima ▶",
-            self.proximo,
-            fundo=AZUL,
-        ).pack(side="left")
+        self._botao(barra, "Próxima ▶", self.proximo, fundo=AZUL).pack(side="left")
 
         self.botao_rolagem = self._botao(
-            barra,
-            "⏸ Pausar rolagem",
-            self.alternar_rolagem,
-            fundo=CIANO,
-            cor=ROXO,
+            barra, "⏸ Pausar rolagem", self.alternar_rolagem,
+            fundo=CIANO, cor=ROXO,
         )
-        self.botao_rolagem.pack(
-            side="left",
-            padx=(10, 0),
-        )
+        self.botao_rolagem.pack(side="left", padx=(8, 0))
+
+        self._botao(
+            barra, "▣ Ampliar", self.entrar_modo_apresentacao,
+            fundo=ROXO, cor=BRANCO,
+        ).pack(side="left", padx=(8, 0))
 
         self.indicador_tela = tk.Label(
-            barra,
-            text="",
-            bg=CINZA,
-            fg=ROXO,
+            barra, text="", bg=CINZA, fg=ROXO,
             font=("Segoe UI", 10, "bold"),
         )
-        self.indicador_tela.pack(
-            side="right",
-            padx=10,
-        )
+        self.indicador_tela.pack(side="right", padx=8)
+
+        barra_busca = tk.Frame(self.corpo, bg=CINZA)
+        barra_busca.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            barra_busca, text="Buscar OS:", bg=CINZA, fg=ROXO,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left", padx=(2, 8))
+        campo_busca = ttk.Entry(barra_busca, width=24, font=("Segoe UI", 11))
+        campo_busca.pack(side="left")
+        campo_busca.insert(0, self.busca_os)
+        campo_busca.bind("<KeyRelease>", self._agendar_busca_processos)
+        self._campo_busca_processos = campo_busca
+        tk.Label(
+            barra_busca, text="Digite a OS completa ou parte dela.",
+            bg=CINZA, fg=CINZA_ESCURO, font=("Segoe UI", 9),
+        ).pack(side="left", padx=10)
 
     def _atualizar_indicador(self):
         if not hasattr(self, "indicador_tela"):
@@ -1271,6 +1621,22 @@ class Dashboard:
             pass
 
         return 0
+
+    def _quantidade_filtrada_tela(self, funcao):
+        try:
+            if funcao == self._mostrar_pintura:
+                registros = dados_pintura(self.dados)
+            elif funcao == self._mostrar_prontos:
+                registros = dados_prontos(self.dados)
+            elif funcao == self._mostrar_jateando:
+                registros = dados_jateamento(self.dados)
+            elif funcao == self._mostrar_prazos_processos:
+                registros = dados_prazos(self.dados)
+            else:
+                return 0
+            return len(self._filtrar_os_busca(registros))
+        except Exception:
+            return 0
 
     # ========================================================
     # ROLAGEM AUTOMÁTICA
@@ -1374,6 +1740,17 @@ class Dashboard:
 
         self._canvas_rolagem = canvas
         self._inicio_rolagem = 0.0
+
+        # Durante uma busca, mantenha os cartões imóveis para facilitar a leitura.
+        # A rolagem só é retomada automaticamente quando a busca é apagada,
+        # caso ela tenha sido pausada por causa da própria busca.
+        if self.busca_os and self._pausa_por_busca:
+            self.rolagem_ativa = False
+            self.rolagem_pausada_manual = True
+            if self.botao_rolagem is not None:
+                self.botao_rolagem.config(text="▶ Retomar rolagem")
+            return
+
         self.rolagem_ativa = True
         self.rolagem_pausada_manual = False
 
@@ -1407,11 +1784,19 @@ class Dashboard:
                     if final >= 0.999:
                         canvas.yview_moveto(0)
                     else:
+                        # Ajusta a fração de deslocamento à altura do conteúdo:
+                        # cartões altos/listas longas não ficam lentos, e listas
+                        # curtas não disparam rapidamente pela tela.
+                        pixels_por_segundo = max(
+                            12.0,
+                            min(45.0, 12.0 + (altura_conteudo / 180.0)),
+                        )
+                        deslocamento_pixels = pixels_por_segundo * (
+                            INTERVALO_ROLAGEM_MS / 1000.0
+                        )
+                        passo_adaptativo = deslocamento_pixels / altura_conteudo
                         canvas.yview_moveto(
-                            min(
-                                atual + PASSO_ROLAGEM,
-                                1.0,
-                            )
+                            min(atual + passo_adaptativo, 1.0)
                         )
 
                 self._id_rolagem = self.root.after(
@@ -1586,6 +1971,15 @@ class Dashboard:
                 if dias != "":
                     detalhes.append(f"Dias até o prazo: {dias}")
 
+        # A data de jateamento deve aparecer no cartão da OS quando informada.
+        if tipo == "jateando":
+            data_jateamento = self._primeiro_valor(
+                linha,
+                ["Jateamento", "Data Jateamento", "Data do Jateamento"],
+            )
+            if data_jateamento:
+                detalhes.append(f"Jateado em: {data_jateamento}")
+
         # Data da 2ª demão é considerada a data em que
         # a peça ficou pronta, conforme solicitado.
         if tipo == "pronto":
@@ -1661,7 +2055,10 @@ class Dashboard:
         tipo="processo",
         mensagem_vazia="Nenhuma OS encontrada.",
     ):
+        registros = self._filtrar_os_busca(registros)
         if registros is None or registros.empty:
+            if self.busca_os:
+                mensagem_vazia = f"Nenhuma OS correspondente a '{self.busca_os}' foi encontrada nesta tela."
             self._vazio(
                 mensagem_vazia,
                 pai=self.corpo,
@@ -1730,7 +2127,7 @@ class Dashboard:
             fundo,
             texto,
             tipo="pronto",
-            mensagem_vazia=("Nenhuma peça ficou pronta nos últimos 3 dias."),
+            mensagem_vazia=("Nenhuma peça ficou pronta nos últimos 30 dias."),
         )
 
     # ========================================================
@@ -1753,6 +2150,7 @@ class Dashboard:
             registros,
             fundo,
             texto,
+            tipo="jateando",
             mensagem_vazia=("Nenhum processo em jateamento encontrado."),
         )
 
